@@ -1,0 +1,223 @@
+module ClearRoute.TestService where
+
+import Daml.Script
+import DA.Assert
+import DA.Optional (fromSome)
+import DA.Time (addRelTime, days, seconds)
+import ClearRoute.Types
+import ClearRoute.Offer
+import ClearRoute.Agreement
+import ClearRoute.Allowance
+import ClearRoute.Demo
+import ClearRoute.Invoice
+import ClearRoute.FundingReceipt
+import ClearRoute.TopUpReceipt
+
+-- All scripts execute against the local script interpreter. A MainNet enum in
+-- these tests is a policy input, never a MainNet connection or a real payment.
+setup : ServiceMode -> Network -> Script (Party, Party, Party, Time, ContractId ServiceAgreement)
+setup mode network = script do
+  provider <- allocateParty "Provider"
+  customer <- allocateParty "Customer"
+  other <- allocateParty "OtherCustomer"
+  now <- getTime
+  offer <- submit provider $ createCmd ServiceOffer with
+    provider; customer; network; mode
+    agreementId = "agreement-1"
+    terms = ServiceTerms "terms-v1" "fixture-policy-v1" 25.0 1000 (now `addRelTime` days 90)
+    acceptBefore = now `addRelTime` days 1
+  serviceAgreement <- submit customer $ exerciseCmd offer Accept
+  pure (provider, customer, other, now, serviceAgreement)
+
+allowance : Party -> Time -> ContractId ServiceAgreement -> Script (ContractId UsageAllowance)
+allowance provider now serviceAgreement =
+  submit provider $ exerciseCmd serviceAgreement IssueAllowance with
+    allowanceId = "allowance-1"
+    units = 100
+    allowanceExpiresAt = now `addRelTime` days 1
+
+invoice : Network -> Script (Party, Party, Party, ContractId Invoice)
+invoice network = script do
+  (provider, customer, other, start, serviceAgreement) <- setup ManagedUsage network
+  let end = start `addRelTime` days 15
+  setTime end
+  cid <- submit provider $ exerciseCmd serviceAgreement IssueInvoice with
+    invoiceId = "invoice-1"
+    periodStart = start
+    periodEnd = end
+    dueAt = end `addRelTime` days 3
+    lines = [InvoiceLine "charge-1" "usage-1" "fixture-quote-1" 2.50,
+             InvoiceLine "charge-2" "usage-2" "fixture-quote-2" 1.25]
+  pure (provider, customer, other, cid)
+
+testOfferRequiresCustomerAcceptance : Script ()
+testOfferRequiresCustomerAcceptance = script do
+  provider <- allocateParty "Provider"
+  customer <- allocateParty "Customer"
+  other <- allocateParty "Other"
+  now <- getTime
+  offer <- submit provider $ createCmd ServiceOffer with
+    provider; customer; network = LocalNet; mode = ManagedUsage
+    agreementId = "agreement-auth"
+    terms = ServiceTerms "terms-v1" "fixture-v1" 10.0 1000 (now `addRelTime` days 30)
+    acceptBefore = now `addRelTime` days 1
+  submitMustFail provider $ exerciseCmd offer Accept
+  submitMustFail other $ exerciseCmd offer Accept
+  serviceAgreement <- submit customer $ exerciseCmd offer Accept
+  submitMustFail customer $ exerciseCmd offer Accept
+  record <- queryContractId customer serviceAgreement
+  (fromSome record).provider === provider
+  invisible <- queryContractId other serviceAgreement
+  invisible === None
+
+testCustomerCannotIssueOwnAllowance : Script ()
+testCustomerCannotIssueOwnAllowance = script do
+  (provider, customer, other, now, serviceAgreement) <- setup ManagedUsage LocalNet
+  let choice = IssueAllowance "limit" 100 (now `addRelTime` days 1)
+  submitMustFail customer $ exerciseCmd serviceAgreement choice
+  submitMustFail other $ exerciseCmd serviceAgreement choice
+  cid <- submit provider $ exerciseCmd serviceAgreement choice
+  record <- queryContractId customer cid
+  (fromSome record).remainingUnits === 100
+  submitMustFail customer $ exerciseCmd cid RevokeAllowance
+
+testAllowanceRejectsInvalidAmountsAndMode : Script ()
+testAllowanceRejectsInvalidAmountsAndMode = script do
+  (provider, _, _, now, serviceAgreement) <- setup ManagedUsage LocalNet
+  submitMustFail provider $ exerciseCmd serviceAgreement (IssueAllowance "zero" 0 (now `addRelTime` days 1))
+  submitMustFail provider $ exerciseCmd serviceAgreement (IssueAllowance "negative" (-1) (now `addRelTime` days 1))
+  submitMustFail provider $ exerciseCmd serviceAgreement (IssueAllowance "excess" 1001 (now `addRelTime` days 1))
+  submitMustFail provider $ exerciseCmd serviceAgreement (IssueAllowance "long" 100 (now `addRelTime` days 91))
+  (topupProvider, _, _, topupNow, topupAgreement) <- setup DirectTopUp LocalNet
+  submitMustFail topupProvider $ exerciseCmd topupAgreement (IssueAllowance "topup-is-not-traffic" 100 (topupNow `addRelTime` days 1))
+
+testDemoWorkflowAndTenantIsolation : Script ()
+testDemoWorkflowAndTenantIsolation = script do
+  (provider, customer, other, now, serviceAgreement) <- setup ManagedUsage LocalNet
+  cid <- allowance provider now serviceAgreement
+  submitMustFail other $ exerciseCmd cid (SubmitDemoJob "wrong-customer")
+  job <- submit customer $ exerciseCmd cid (SubmitDemoJob "job-1")
+  hidden <- queryContractId other job
+  hidden === None
+  submitMustFail customer $ exerciseCmd job (CompleteDemoJob "customer-cannot-attest-provider-result")
+  submitMustFail provider $ exerciseCmd job (CompleteDemoJob "")
+  completion <- submit provider $ exerciseCmd job (CompleteDemoJob "sample-result-1")
+  result <- queryContractId customer completion
+  (fromSome result).jobId === "job-1"
+  submitMustFail provider $ exerciseCmd job (CompleteDemoJob "cannot-complete-twice")
+
+testMeasuredUsageDeduplicationAndOvershoot : Script ()
+testMeasuredUsageDeduplicationAndOvershoot = script do
+  (provider, customer, _, now, serviceAgreement) <- setup ManagedUsage LocalNet
+  cid <- allowance provider now serviceAgreement
+  let usage = RecordMeasuredUsage "usage-1" "local-completion-1" 20 now
+  submitMustFail customer $ exerciseCmd cid usage
+  (next, receipt) <- submit provider $ exerciseCmd cid usage
+  record <- queryContractId customer next
+  (fromSome record).remainingUnits === 80
+  evidence <- queryContractId customer receipt
+  (fromSome evidence).completionRef === "local-completion-1"
+  submitMustFail provider $ exerciseCmd next usage
+  submitMustFail provider $ exerciseCmd next (RecordMeasuredUsage "negative" "ref" (-1) now)
+  submitMustFail provider $ exerciseCmd next (RecordMeasuredUsage "future" "ref" 1 (now `addRelTime` seconds 1))
+  (overdrawn, _) <- submit provider $ exerciseCmd next (RecordMeasuredUsage "usage-2" "local-completion-2" 90 now)
+  overshoot <- queryContractId customer overdrawn
+  (fromSome overshoot).remainingUnits === (-10)
+  submitMustFail customer $ exerciseCmd overdrawn (SubmitDemoJob "exhausted")
+
+testOfferAndAllowanceExpiry : Script ()
+testOfferAndAllowanceExpiry = script do
+  (provider, customer, _, now, serviceAgreement) <- setup ManagedUsage LocalNet
+  cid <- allowance provider now serviceAgreement
+  offer <- submit provider $ createCmd ServiceOffer with
+    provider; customer; network = LocalNet; mode = DirectTopUp
+    agreementId = "expiring"
+    terms = ServiceTerms "terms-v1" "fixture-v1" 10.0 1000 (now `addRelTime` days 30)
+    acceptBefore = now `addRelTime` seconds 10
+  setTime (now `addRelTime` days 1)
+  submitMustFail customer $ exerciseCmd offer Accept
+  submitMustFail customer $ exerciseCmd cid (SubmitDemoJob "too-late")
+
+testInvoicePeriodAndDuplicateLines : Script ()
+testInvoicePeriodAndDuplicateLines = script do
+  (provider, customer, _, start, serviceAgreement) <- setup ManagedUsage LocalNet
+  let end = start `addRelTime` days 15
+      due = end `addRelTime` days 1
+      line = InvoiceLine "same-charge" "usage-ref" "fixture-quote" 1.0
+  submitMustFail provider $ exerciseCmd serviceAgreement (IssueInvoice "early" start end due [line])
+  setTime end
+  submitMustFail customer $ exerciseCmd serviceAgreement (IssueInvoice "not-authorized" start end due [line])
+  submitMustFail provider $ exerciseCmd serviceAgreement (IssueInvoice "wrong-period" start (start `addRelTime` days 14) due [line])
+  submitMustFail provider $ exerciseCmd serviceAgreement (IssueInvoice "duplicated" start end due [line, line])
+  submitMustFail provider $ exerciseCmd serviceAgreement (IssueInvoice "negative" start end due [line with fixedUsd = -1.0])
+  submitMustFail provider $ exerciseCmd serviceAgreement (IssueInvoice "empty" start end due [])
+  pure ()
+
+testInvoicePaymentsAndDispute : Script ()
+testInvoicePaymentsAndDispute = script do
+  (provider, customer, other, cid) <- invoice LocalNet
+  initial <- queryContractId customer cid
+  invoiceTotal (fromSome initial).lines === 3.75
+  hidden <- queryContractId other cid
+  hidden === None
+  let payment = RecordVerifiedPayment "payment-1" "fixture-bank-event-1" SimulatedPayment 1.0
+  submitMustFail customer $ exerciseCmd cid payment
+  (partPaid, receipt) <- submit provider $ exerciseCmd cid payment
+  receiptRecord <- queryContractId customer receipt
+  (fromSome receiptRecord).settledUsd === 1.0
+  submitMustFail provider $ exerciseCmd partPaid payment
+  submitMustFail provider $ exerciseCmd partPaid (RecordVerifiedPayment "zero" "evidence" SimulatedPayment 0.0)
+  submitMustFail provider $ exerciseCmd partPaid (RecordVerifiedPayment "too-large" "evidence" SimulatedPayment 3.0)
+  dispute <- submit customer $ exerciseCmd partPaid (DisputeInvoice "Please review usage-2")
+  disputeRecord <- queryContractId provider dispute
+  (fromSome disputeRecord).customer === customer
+  stillPartPaid <- queryContractId customer partPaid
+  (fromSome stillPartPaid).paidUsd === 1.0
+  (settled, _) <- submit provider $ exerciseCmd partPaid (RecordVerifiedPayment "payment-2" "fixture-bank-event-2" SimulatedPayment 2.75)
+  settledRecord <- queryContractId customer settled
+  (fromSome settledRecord).paidUsd === 3.75
+  submitMustFail provider $ exerciseCmd settled (RecordVerifiedPayment "overpay" "evidence" SimulatedPayment 0.01)
+
+testMainNetPolicyRejectsSimulatedPayment : Script ()
+testMainNetPolicyRejectsSimulatedPayment = script do
+  (provider, _, _, cid) <- invoice MainNet
+  submitMustFail provider $ exerciseCmd cid (RecordVerifiedPayment "simulation" "fake-payment" SimulatedPayment 1.0)
+
+testNativeReceiptsRequireProviderAuthority : Script ()
+testNativeReceiptsRequireProviderAuthority = script do
+  (provider, customer, other, now, _) <- setup DirectTopUp LocalNet
+  let receipt = TopUpReceipt provider customer LocalNet "order-1" "fixture-native-transfer-ref" 5.0 now
+  submitMustFail customer $ createCmd receipt
+  submitMustFail provider $ createCmd (receipt with nativeTransferRef = "")
+  submitMustFail provider $ createCmd (receipt with recipientCc = 0.0)
+  cid <- submit provider $ createCmd receipt
+  hidden <- queryContractId other cid
+  hidden === None
+  received <- queryContractId customer cid
+  (fromSome received).recipientCc === 5.0
+  -- No token has moved: this script exercises only the receipt attestation.
+  let funding = FundingReceipt provider customer LocalNet "plan" "purchase-fixture" 1000 1.0 now
+  submitMustFail customer $ createCmd funding
+  submitMustFail provider $ createCmd (funding with trafficUnitsPurchased = -1)
+  pure ()
+
+testOnlyPartiesCanCloseAgreement : Script ()
+testOnlyPartiesCanCloseAgreement = script do
+  (_, customer, other, _, serviceAgreement) <- setup ManagedUsage LocalNet
+  submitMustFail other $ exerciseCmd serviceAgreement (CloseAgreement other)
+  submit customer $ exerciseCmd serviceAgreement (CloseAgreement customer)
+  closed <- queryContractId customer serviceAgreement
+  closed === None
+
+testInvalidOfferTerms : Script ()
+testInvalidOfferTerms = script do
+  provider <- allocateParty "Provider"
+  customer <- allocateParty "Customer"
+  now <- getTime
+  let offer = ServiceOffer provider customer "agreement" LocalNet ManagedUsage
+        (ServiceTerms "terms" "fixture" 10.0 100 (now `addRelTime` days 10))
+        (now `addRelTime` days 1)
+  submitMustFail provider $ createCmd (offer with terms = offer.terms with exposureLimitUsd = 0.0)
+  submitMustFail provider $ createCmd (offer with customer = provider)
+  submitMustFail provider $ createCmd (offer with agreementId = "")
+  pure ()

@@ -1,0 +1,7 @@
+.daml/
+tests/.daml/
+log/
+evidence/upgrade-*/
+evidence-run.log
+*.log
+!evidence/ledger-tests.log

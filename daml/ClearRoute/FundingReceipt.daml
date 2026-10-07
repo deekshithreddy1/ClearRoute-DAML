@@ -1,0 +1,21 @@
+module ClearRoute.FundingReceipt where
+
+import ClearRoute.Types
+
+-- Both native receipts are attestations issued only AFTER the backend verified
+-- native completion. They do not execute purchases/transfers or hold any CC.
+template FundingReceipt
+  with
+    provider : Party
+    customer : Party
+    network : Network
+    fundingPlanRef : Text
+    nativePurchaseRef : Text
+    trafficUnitsPurchased : Int
+    actualCcBurned : Decimal
+    completedAt : Time
+  where
+    signatory provider
+    observer customer
+    ensure provider /= customer && fundingPlanRef /= "" && nativePurchaseRef /= ""
+      && trafficUnitsPurchased > 0 && actualCcBurned > 0.0

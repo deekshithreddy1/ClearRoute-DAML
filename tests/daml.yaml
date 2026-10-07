@@ -1,0 +1,10 @@
+sdk-version: 3.4.11
+name: clearroute-tests
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../.daml/dist/clearroute-service-0.1.0.dar

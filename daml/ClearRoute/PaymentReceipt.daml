@@ -1,0 +1,21 @@
+module ClearRoute.PaymentReceipt where
+
+import ClearRoute.Types
+
+template PaymentReceipt
+  with
+    provider : Party
+    customer : Party
+    network : Network
+    invoiceId : Text
+    paymentRef : Text
+    evidenceRef : Text
+    paymentRail : PaymentRail
+    settledUsd : Decimal
+    recordedAt : Time
+  where
+    signatory provider
+    observer customer
+    ensure provider /= customer && invoiceId /= "" && paymentRef /= "" && evidenceRef /= "" && settledUsd > 0.0
+      && (network /= MainNet || paymentRail /= SimulatedPayment)
+    -- The backend enforces cross-invoice uniqueness of payment references.

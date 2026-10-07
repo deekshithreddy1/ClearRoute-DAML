@@ -1,0 +1,45 @@
+{
+  "status": "local-validation-passed; hosted Devnet smoke test pending",
+  "createdAtUtc": "2026-10-07T16:44:01.592018+00:00",
+  "artifact": "clearroute-service-0.1.0.dar",
+  "sha256": "B027BC5DF95F0F424BC8084AE9A6F401EE61B25634824B2483405B43EF91B50F",
+  "bytes": 544452,
+  "packageName": "clearroute-service",
+  "packageVersion": "0.1.0",
+  "packageId": "a5d7aff449a19279433832cda0a58adc9632f832a15ce05d427a305bc4b012f5",
+  "sdkVersion": "3.4.11",
+  "unitScriptsPassed": 31,
+  "ledgerScriptsPassed": 31,
+  "testDarSha256": "5063e0309fa7778326335e8adb6a343c337c191aff6f8a47f379e456789224ec",
+  "evidenceSha256": {
+    "coverage.bin": "3505bd176c2ea9ef88f895c8f0444d22d5fccf7b069a4646773704afd2e11bbe",
+    "coverage.txt": "3e451dcb4b2c02082154460357e4049c10014d9258498cca531a92f2c45a3046",
+    "dar-inspection.json": "e21dcfd60bd6b4e9f6fcd590ddf81f3520d0f230bee045e6b01f6b95bd4cc170",
+    "dar-sha256.json": "2a95d39ea921ad345b4ec9ecfabbbbb8a210d2be6104bff26125b7db4c308902",
+    "ledger-results.json": "0a18d1de2f9871d8a161ba50f3850a3f45f4d8122d03bdd83aeca35de2e455da",
+    "ledger-tests.log": "d53a7c57a22593d5ed3f50b1ba617338f967fe9dfb671324f59fa7c725cd49a8",
+    "unit-tests.xml": "ad5951d59af394f34508a535b2e47735e754b42bbe1d0240176aa03b48a8262a",
+    "upgrade-results.json": "0ae5536f8770aa06fb1d5a2677f8fde48cacdef70ee5708f726d7c94e22b36dd"
+  },
+  "sourceSha256": {
+    "daml/ClearRoute/Agreement.daml": "91879e37a7c6bb3198b1306fbd5d803c3a9c45d3bba241fcbe479018b7e39cbf",
+    "daml/ClearRoute/Allowance.daml": "4cdb99abc3fb9379ce28f2b7e69a52cb33f68ddccec71f58f39deead2aeb52c7",
+    "daml/ClearRoute/Demo.daml": "cc7539f58fddfef35977306801c3ff12051afb1a0386e8cdfe8568a32264b84c",
+    "daml/ClearRoute/Dispute.daml": "fd16985e55593693aa801f606c3c2d9cb217720f8164887ecaa4ba6f13c5002a",
+    "daml/ClearRoute/FundingReceipt.daml": "4a229f621793ef81eb2bdb319e483d196c4a66ca7f2d2118bd338a95a30746da",
+    "daml/ClearRoute/Invoice.daml": "f04eff598914f63c7c634b185e49bf947f2afb2eaaa0f4bfca059f753aae407f",
+    "daml/ClearRoute/Offer.daml": "a325bd90e5aa290f12bb1aada8178de44b9916cef46832a7e256f6d0f83e745c",
+    "daml/ClearRoute/PaymentReceipt.daml": "6b54caa0c7ce2ed28161f95d4ca3e5fab2b8cf113723bbbd5672bb31be75b6ef",
+    "daml/ClearRoute/TopUpReceipt.daml": "42ec7e2af0f0b5a6e31072f9f4ac66d9607105fc4f5010ba14c0aa30e3e56162",
+    "daml/ClearRoute/Types.daml": "21215743f005ea22d448003946c648b5a9f5a2033223bb608d63b0c7649c14bb",
+    "daml/ClearRoute/UsageReceipt.daml": "4241de415071af6e33c228f889c6c2e3850791756fb431632630942d775721e8",
+    "tests/daml/ClearRoute/TestBoundaries.daml": "5dac779b7a131c8010058e292d9f99e8246ef9f3325a7c62d5155b0eeef04524",
+    "tests/daml/ClearRoute/TestService.daml": "fe0fb7b981c4ae760730641e9e8d2541dce9268ac26a6ef0b074240e379fe75e"
+  },
+  "limitations": [
+    "New package family; not an upgrade of the prototype clearroute package.",
+    "No NODERS 3.5.19, hosted authentication or cross-participant validation.",
+    "No native CC transfers, traffic purchases or external settlement executed.",
+    "Application approval, concurrent limits, suspension and global idempotency remain required."
+  ]
+}

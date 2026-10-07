@@ -1,0 +1,68 @@
+module ClearRoute.Agreement where
+
+import DA.Time (addRelTime, days)
+import ClearRoute.Types
+import ClearRoute.Allowance
+import ClearRoute.Invoice
+
+template ServiceAgreement
+  with
+    provider : Party
+    customer : Party
+    agreementId : Text
+    network : Network
+    mode : ServiceMode
+    terms : ServiceTerms
+  where
+    signatory provider, customer
+    ensure provider /= customer && agreementId /= "" && validTerms terms
+
+    -- Aggregate financial exposure and native local-account provisioning belong
+    -- to the durable backend/host connector; issuing this record does neither.
+    nonconsuming choice IssueAllowance : ContractId UsageAllowance
+      with
+        allowanceId : Text
+        units : Int
+        allowanceExpiresAt : Time
+      controller provider
+      do
+        now <- getTime
+        assertMsg "Only managed accounts receive a usage allowance" (mode == ManagedUsage)
+        assertMsg "Invalid allowance size" (units > 0 && units <= terms.maxAllowanceUnits)
+        assertMsg "Agreement or allowance expired" (now < allowanceExpiresAt && allowanceExpiresAt <= terms.validUntil)
+        create UsageAllowance with
+          provider; customer; agreementId; network; allowanceId
+          pricingPolicyVersion = terms.pricingPolicyVersion
+          approvedUnits = units
+          remainingUnits = units
+          expiresAt = allowanceExpiresAt
+          recordedUsageRefs = []
+
+    -- An invoice is a provider-issued claim linked to accepted terms, not proof
+    -- of settlement. Customer usage evidence is independently verified off-ledger.
+    nonconsuming choice IssueInvoice : ContractId Invoice
+      with
+        invoiceId : Text
+        periodStart : Time
+        periodEnd : Time
+        dueAt : Time
+        lines : [InvoiceLine]
+      controller provider
+      do
+        now <- getTime
+        assertMsg "Only managed usage is invoiced by this choice" (mode == ManagedUsage)
+        assertMsg "Billing period must be exactly fifteen days" (periodEnd == periodStart `addRelTime` days 15)
+        assertMsg "Cannot issue before the period closes" (periodEnd <= now)
+        assertMsg "Invalid invoice due date" (dueAt >= now)
+        create Invoice with
+          provider; customer; agreementId; network; invoiceId; periodStart; periodEnd; dueAt; lines
+          pricingPolicyVersion = terms.pricingPolicyVersion
+          paidUsd = 0.0
+          recordedPaymentRefs = []
+
+    choice CloseAgreement : ()
+      with actor : Party
+      controller actor
+      do
+        assertMsg "Only an agreement party may close" (actor == provider || actor == customer)
+        pure ()

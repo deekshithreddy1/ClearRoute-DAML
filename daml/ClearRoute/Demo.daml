@@ -1,0 +1,35 @@
+module ClearRoute.Demo where
+
+import ClearRoute.Types
+
+template DemoJob
+  with
+    provider : Party
+    customer : Party
+    network : Network
+    allowanceId : Text
+    jobId : Text
+    requestedAt : Time
+  where
+    signatory provider, customer
+    ensure provider /= customer && allowanceId /= "" && jobId /= ""
+
+    choice CompleteDemoJob : ContractId DemoCompletion
+      with resultRef : Text
+      controller provider
+      do
+        now <- getTime
+        create DemoCompletion with provider; customer; network; jobId; resultRef; completedAt = now
+
+template DemoCompletion
+  with
+    provider : Party
+    customer : Party
+    network : Network
+    jobId : Text
+    resultRef : Text
+    completedAt : Time
+  where
+    signatory provider
+    observer customer
+    ensure provider /= customer && jobId /= "" && resultRef /= ""

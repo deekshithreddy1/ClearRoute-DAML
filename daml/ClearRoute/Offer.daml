@@ -1,0 +1,36 @@
+module ClearRoute.Offer where
+
+import ClearRoute.Types
+import ClearRoute.Agreement
+
+-- The provider proposes; the customer must explicitly accept. Acceptance obtains
+-- both parties' authority without the service impersonating the customer.
+template ServiceOffer
+  with
+    provider : Party
+    customer : Party
+    agreementId : Text
+    network : Network
+    mode : ServiceMode
+    terms : ServiceTerms
+    acceptBefore : Time
+  where
+    signatory provider
+    observer customer
+    ensure provider /= customer && agreementId /= "" && validTerms terms
+      && acceptBefore <= terms.validUntil
+
+    choice Accept : ContractId ServiceAgreement
+      controller customer
+      do
+        now <- getTime
+        assertMsg "The service offer has expired" (now < acceptBefore)
+        create ServiceAgreement with provider; customer; agreementId; network; mode; terms
+
+    choice Decline : ()
+      controller customer
+      do pure ()
+
+    choice Withdraw : ()
+      controller provider
+      do pure ()

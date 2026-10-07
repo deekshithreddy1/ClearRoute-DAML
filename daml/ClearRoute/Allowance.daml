@@ -1,0 +1,61 @@
+module ClearRoute.Allowance where
+
+import ClearRoute.Types
+import ClearRoute.UsageReceipt
+import ClearRoute.Demo
+
+template UsageAllowance
+  with
+    provider : Party
+    customer : Party
+    agreementId : Text
+    network : Network
+    allowanceId : Text
+    pricingPolicyVersion : Text
+    approvedUnits : Int
+    remainingUnits : Int
+    expiresAt : Time
+    recordedUsageRefs : [Text]
+  where
+    signatory provider, customer
+    ensure provider /= customer && agreementId /= ""
+      && unique recordedUsageRefs && all (/= "") recordedUsageRefs
+      && allowanceId /= "" && pricingPolicyVersion /= "" && approvedUnits > 0
+      && remainingUnits <= approvedUnits
+
+    -- This authorizes a sample business action. It is not synchronizer enforcement
+    -- and does not guarantee resource reservation for parallel submissions.
+    nonconsuming choice SubmitDemoJob : ContractId DemoJob
+      with jobId : Text
+      controller customer
+      do
+        now <- getTime
+        assertMsg "Allowance expired" (now < expiresAt)
+        assertMsg "Allowance exhausted" (remainingUnits > 0)
+        create DemoJob with provider; customer; network; allowanceId; jobId; requestedAt = now
+
+    -- Record actual observed completions even if concurrent activity overshot the
+    -- allowance. The resulting negative balance blocks subsequent demo actions.
+    choice RecordMeasuredUsage : (ContractId UsageAllowance, ContractId UsageReceipt)
+      with
+        usageRef : Text
+        completionRef : Text
+        measuredUnits : Int
+        measurementAt : Time
+      controller provider
+      do
+        now <- getTime
+        assertMsg "Measurement must not be in the future" (measurementAt <= now)
+        assertMsg "Measured usage cannot be negative" (measuredUnits >= 0)
+        assertMsg "Usage reference was already recorded" (not (usageRef `elem` recordedUsageRefs))
+        receipt <- create UsageReceipt with
+          provider; customer; network; allowanceId; usageRef; completionRef; measuredUnits; measurementAt
+          pricingPolicyVersion
+        next <- create this with
+          remainingUnits = remainingUnits - measuredUnits
+          recordedUsageRefs = usageRef :: recordedUsageRefs
+        pure (next, receipt)
+
+    choice RevokeAllowance : ()
+      controller provider
+      do pure ()

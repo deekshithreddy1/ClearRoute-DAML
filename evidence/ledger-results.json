@@ -1,0 +1,11 @@
+{
+    "testedAtUtc":  "2026-10-07T16:42:26.1822019Z",
+    "endpoint":  "127.0.0.1:16865",
+    "sdk":  "3.4.11",
+    "darSha256":  "B027BC5DF95F0F424BC8084AE9A6F401EE61B25634824B2483405B43EF91B50F",
+    "expected":  31,
+    "passed":  31,
+    "failed":  0,
+    "exitCode":  0,
+    "scope":  "Canton sandbox Ledger API; no Splice, token transfers, hosted auth or Devnet"
+}

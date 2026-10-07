@@ -1,0 +1,326 @@
+module ClearRoute.TestBoundaries where
+
+import Daml.Script
+import DA.Assert
+import DA.Foldable (forA_)
+import DA.Optional (fromSome)
+import DA.Time (addRelTime, days, seconds)
+import ClearRoute.Types
+import ClearRoute.Offer
+import ClearRoute.Agreement
+import ClearRoute.Allowance
+import ClearRoute.UsageReceipt
+import ClearRoute.Demo
+import ClearRoute.Invoice
+import ClearRoute.PaymentReceipt
+import ClearRoute.Dispute
+import ClearRoute.FundingReceipt
+import ClearRoute.TopUpReceipt
+import ClearRoute.TestService (setup, allowance, invoice)
+
+testPureValidation : Script ()
+testPureValidation = script do
+  now <- getTime
+  let terms = ServiceTerms "terms" "policy" 1.0 1 now
+  validTerms terms === True
+  forA_ [(terms with termsRef = ""), (terms with pricingPolicyVersion = ""),
+         (terms with exposureLimitUsd = -0.01), (terms with maxAllowanceUnits = 0)] $ \t ->
+    validTerms t === False
+  let line = InvoiceLine "charge" "usage" "quote" 0.0000000001
+  invoiceTotal [line, line] === 0.0000000002
+  invoiceTotal [] === 0.0
+  forA_ [(line with chargeRef = ""), (line with usageRef = ""), (line with quoteRef = ""),
+         (line with fixedUsd = -0.0000000001)] $ \l -> validLine l === False
+  unique ([] : [Text]) === True
+  unique ["a", "b", "a"] === False
+
+testOfferDeclineWithdrawAndBoundaries : Script ()
+testOfferDeclineWithdrawAndBoundaries = script do
+  (provider, customer, other, now, _) <- setup ManagedUsage DevNet
+  let payload = ServiceOffer provider customer "offer" DevNet ManagedUsage
+        (ServiceTerms "terms" "policy" 1.0 10 (now `addRelTime` days 1))
+        (now `addRelTime` seconds 1)
+  declined <- submit provider $ createCmd payload
+  submitMustFail provider $ exerciseCmd declined Decline
+  submitMustFail other $ exerciseCmd declined Decline
+  submit customer $ exerciseCmd declined Decline
+  queryContractId customer declined >>= (=== None)
+  withdrawn <- submit provider $ createCmd payload
+  submitMustFail customer $ exerciseCmd withdrawn Withdraw
+  submitMustFail other $ exerciseCmd withdrawn Withdraw
+  submit provider $ exerciseCmd withdrawn Withdraw
+  submitMustFail customer $ exerciseCmd withdrawn Accept
+  expired <- submit provider $ createCmd payload
+  setTime (now `addRelTime` seconds 1)
+  submitMustFail customer $ exerciseCmd expired Accept
+  queryContractId customer expired >>= (=== Some payload)
+  submitMustFail provider $ createCmd (payload with acceptBefore = now `addRelTime` days 2)
+
+testAgreementDirectCreationRequiresBothParties : Script ()
+testAgreementDirectCreationRequiresBothParties = script do
+  (provider, customer, other, now, _) <- setup ManagedUsage DevNet
+  let payload = ServiceAgreement provider customer "direct" DevNet ManagedUsage
+        (ServiceTerms "terms" "policy" 1.0 10 (now `addRelTime` days 1))
+  submitMustFail provider $ createCmd payload
+  submitMustFail customer $ createCmd payload
+  submitMustFail other $ createCmd payload
+  cid <- submit (actAs [provider, customer]) $ createCmd payload
+  submitMustFail other $ exerciseCmd cid (CloseAgreement provider)
+  submit provider $ exerciseCmd cid (CloseAgreement provider)
+  submitMustFail provider $ exerciseCmd cid (IssueAllowance "closed" 1 (now `addRelTime` seconds 1))
+
+testAllowanceLimitsExpiryAndRevocation : Script ()
+testAllowanceLimitsExpiryAndRevocation = script do
+  (provider, customer, other, now, serviceAgreement) <- setup ManagedUsage DevNet
+  forA_ [IssueAllowance "" 1 (now `addRelTime` days 1),
+         IssueAllowance "now" 1 now,
+         IssueAllowance "past" 1 (now `addRelTime` seconds (-1))] $ \choice ->
+    submitMustFail provider $ exerciseCmd serviceAgreement choice
+  cid <- submit provider $ exerciseCmd serviceAgreement (IssueAllowance "max" 1000 (now `addRelTime` days 90))
+  submitMustFail other $ exerciseCmd cid RevokeAllowance
+  submit provider $ exerciseCmd cid RevokeAllowance
+  submitMustFail customer $ exerciseCmd cid (SubmitDemoJob "revoked")
+  setTime (now `addRelTime` days 90)
+  submitMustFail provider $ exerciseCmd serviceAgreement (IssueAllowance "expired" 1 (now `addRelTime` days 90))
+
+testMalformedAllowanceCannotBeCreated : Script ()
+testMalformedAllowanceCannotBeCreated = script do
+  (provider, customer, _, now, _) <- setup ManagedUsage DevNet
+  let payload = UsageAllowance provider customer "serviceAgreement" DevNet "allowance" "policy" 100 100 now []
+  submitMustFail provider $ createCmd payload
+  submitMustFail customer $ createCmd payload
+  forA_ [(payload with agreementId = ""), (payload with customer = provider),
+         (payload with allowanceId = ""), (payload with pricingPolicyVersion = ""),
+         (payload with approvedUnits = 0), (payload with remainingUnits = 101),
+         (payload with recordedUsageRefs = [""]), (payload with recordedUsageRefs = ["a", "a"])] $ \bad ->
+    submitMustFail (actAs [provider, customer]) $ createCmd bad
+
+testUsageFailureRollsBackAndConsumedIdCannotReplay : Script ()
+testUsageFailureRollsBackAndConsumedIdCannotReplay = script do
+  (provider, customer, other, now, serviceAgreement) <- setup ManagedUsage DevNet
+  cid <- allowance provider now serviceAgreement
+  forA_ [RecordMeasuredUsage "" "completion" 1 now,
+         RecordMeasuredUsage "usage" "" 1 now,
+         RecordMeasuredUsage "usage" "completion" (-1) now] $ \choice ->
+    submitMustFail provider $ exerciseCmd cid choice
+  submitMustFail other $ exerciseCmd cid (RecordMeasuredUsage "usage" "completion" 1 now)
+  current <- queryContractId customer cid
+  (fromSome current).remainingUnits === 100
+  receipts <- query @UsageReceipt customer
+  receipts === []
+  (zero, _) <- submit provider $ exerciseCmd cid (RecordMeasuredUsage "zero" "completion-0" 0 now)
+  (fromSome <$> queryContractId customer zero) >>= (\a -> a.remainingUnits === 100)
+  submitMustFail provider $ exerciseCmd cid (RecordMeasuredUsage "stale" "completion" 1 now)
+  (empty, _) <- submit provider $ exerciseCmd zero (RecordMeasuredUsage "full" "completion-1" 100 now)
+  (fromSome <$> queryContractId customer empty) >>= (\a -> a.remainingUnits === 0)
+  submitMustFail customer $ exerciseCmd empty (SubmitDemoJob "no-capacity")
+
+testLateMeasurementAndClosureSemantics : Script ()
+testLateMeasurementAndClosureSemantics = script do
+  (provider, customer, _, now, serviceAgreement) <- setup ManagedUsage DevNet
+  cid <- allowance provider now serviceAgreement
+  submit customer $ exerciseCmd serviceAgreement (CloseAgreement customer)
+  -- Closing prevents new issuance; existing commitments remain until revoked/expired.
+  _ <- submit customer $ exerciseCmd cid (SubmitDemoJob "existing-commitment")
+  setTime (now `addRelTime` days 2)
+  submitMustFail customer $ exerciseCmd cid (SubmitDemoJob "expired")
+  -- Completed work is still accountable after expiry, including overshoot.
+  (next, _) <- submit provider $ exerciseCmd cid (RecordMeasuredUsage "late" "completion" 101 now)
+  (fromSome <$> queryContractId customer next) >>= (\a -> a.remainingUnits === -1)
+
+testDemoAuthorizationAndRollback : Script ()
+testDemoAuthorizationAndRollback = script do
+  (provider, customer, other, now, serviceAgreement) <- setup ManagedUsage DevNet
+  cid <- allowance provider now serviceAgreement
+  submitMustFail provider $ exerciseCmd cid (SubmitDemoJob "provider")
+  submitMustFail customer $ exerciseCmd cid (SubmitDemoJob "")
+  job <- submit customer $ exerciseCmd cid (SubmitDemoJob "job")
+  submitMustFail other $ exerciseCmd job (CompleteDemoJob "result")
+  submitMustFail provider $ exerciseCmd job (CompleteDemoJob "")
+  completions <- query @DemoCompletion customer
+  completions === []
+  completed <- submit provider $ exerciseCmd job (CompleteDemoJob "result")
+  queryContractId customer job >>= (=== None)
+  queryContractId other completed >>= (=== None)
+  -- Submission itself is intentionally nonconsuming and does not reserve units.
+  (fromSome <$> queryContractId customer cid) >>= (\a -> a.remainingUnits === 100)
+
+testInvoiceIssuanceBoundaries : Script ()
+testInvoiceIssuanceBoundaries = script do
+  (provider, _, other, start, serviceAgreement) <- setup ManagedUsage DevNet
+  (topProvider, _, _, _, topAgreement) <- setup DirectTopUp DevNet
+  let end = start `addRelTime` days 15
+      line = InvoiceLine "charge" "usage" "quote" 1.0
+  setTime end
+  submitMustFail other $ exerciseCmd serviceAgreement (IssueInvoice "invoice" start end end [line])
+  submitMustFail topProvider $ exerciseCmd topAgreement (IssueInvoice "invoice" start end end [line])
+  forA_ [IssueInvoice "" start end end [line],
+         IssueInvoice "invoice" start end (end `addRelTime` seconds (-1)) [line],
+         IssueInvoice "invoice" start end end [line with usageRef = ""],
+         IssueInvoice "invoice" start end end [line with quoteRef = ""]] $ \choice ->
+    submitMustFail provider $ exerciseCmd serviceAgreement choice
+  _ <- submit provider $ exerciseCmd serviceAgreement (IssueInvoice "valid" start end end [line])
+  pure ()
+
+testPaymentFailureAtomicityAndPrivacy : Script ()
+testPaymentFailureAtomicityAndPrivacy = script do
+  (provider, customer, other, cid) <- invoice DevNet
+  forA_ [RecordVerifiedPayment "" "evidence" BankUSD 1.0,
+         RecordVerifiedPayment "payment" "" BankUSD 1.0,
+         RecordVerifiedPayment "payment" "evidence" BankUSD (-1.0)] $ \choice ->
+    submitMustFail provider $ exerciseCmd cid choice
+  submitMustFail other $ exerciseCmd cid (RecordVerifiedPayment "payment" "evidence" BankUSD 1.0)
+  (fromSome <$> queryContractId customer cid) >>= (\i -> i.paidUsd === 0.0)
+  query @PaymentReceipt customer >>= (=== [])
+  (next, receipt) <- submit provider $ exerciseCmd cid (RecordVerifiedPayment "payment" "evidence" BankUSD 1.0)
+  queryContractId customer cid >>= (=== None)
+  queryContractId other receipt >>= (=== None)
+  submitMustFail provider $ exerciseCmd cid (RecordVerifiedPayment "stale" "evidence" BankUSD 1.0)
+  (fromSome <$> queryContractId customer next) >>= (\i -> i.recordedPaymentRefs === ["payment"])
+
+testAllRealPaymentRailsAndDecimalPrecision : Script ()
+testAllRealPaymentRailsAndDecimalPrecision = script do
+  forA_ [BankUSD, NativeUSDC, CantonUSDCx] $ \rail -> do
+    (provider, customer, _, cid) <- invoice MainNet
+    (partial, _) <- submit provider $ exerciseCmd cid (RecordVerifiedPayment "tiny" "evidence-1" rail 0.0000000001)
+    (full, _) <- submit provider $ exerciseCmd partial (RecordVerifiedPayment "rest" "evidence-2" rail 3.7499999999)
+    (fromSome <$> queryContractId customer full) >>= (\i -> i.paidUsd === 3.75)
+
+testDisputePermissionsAndEmptyReason : Script ()
+testDisputePermissionsAndEmptyReason = script do
+  (provider, customer, other, cid) <- invoice DevNet
+  submitMustFail provider $ exerciseCmd cid (DisputeInvoice "reason")
+  submitMustFail other $ exerciseCmd cid (DisputeInvoice "reason")
+  submitMustFail customer $ exerciseCmd cid (DisputeInvoice "")
+  dispute <- submit customer $ exerciseCmd cid (DisputeInvoice "reason")
+  queryContractId other dispute >>= (=== None)
+  (fromSome <$> queryContractId provider dispute) >>= (\d -> d.invoiceId === "invoice-1")
+  (fromSome <$> queryContractId customer cid) >>= (\i -> i.paidUsd === 0.0)
+
+testMalformedInvoiceState : Script ()
+testMalformedInvoiceState = script do
+  (provider, customer, _, cid) <- invoice DevNet
+  record <- queryContractId customer cid
+  let payload = fromSome record
+  forA_ [(payload with agreementId = ""), (payload with customer = provider),
+         (payload with paidUsd = -0.1), (payload with paidUsd = 4.0),
+         (payload with paidUsd = 1.0),
+         (payload with recordedPaymentRefs = ["unfunded"]),
+         (payload with paidUsd = 1.0; recordedPaymentRefs = [""]),
+         (payload with paidUsd = 1.0; recordedPaymentRefs = ["a", "a"])] $ \bad ->
+    submitMustFail provider $ createCmd bad
+
+testNativeReceiptsValidityAndVisibility : Script ()
+testNativeReceiptsValidityAndVisibility = script do
+  (provider, customer, other, now, _) <- setup DirectTopUp DevNet
+  let funding = FundingReceipt provider customer DevNet "plan" "native-purchase" 1 0.0000000001 now
+      topup = TopUpReceipt provider customer DevNet "order" "native-transfer" 0.0000000001 now
+  forA_ [(funding with fundingPlanRef = ""), (funding with nativePurchaseRef = ""),
+         (funding with actualCcBurned = 0.0), (funding with trafficUnitsPurchased = 0),
+         (funding with customer = provider)] $ \bad -> submitMustFail provider $ createCmd bad
+  submitMustFail other $ createCmd funding
+  funded <- submit provider $ createCmd funding
+  queryContractId customer funded >>= (=== Some funding)
+  queryContractId other funded >>= (=== None)
+  forA_ [(topup with orderRef = ""), (topup with nativeTransferRef = ""),
+         (topup with recipientCc = -0.1), (topup with customer = provider)] $ \bad ->
+    submitMustFail provider $ createCmd bad
+  topped <- submit provider $ createCmd topup
+  queryContractId customer topped >>= (=== Some topup)
+  queryContractId other topped >>= (=== None)
+
+testReceiptDirectCreateGuards : Script ()
+testReceiptDirectCreateGuards = script do
+  (provider, customer, _, now, _) <- setup ManagedUsage DevNet
+  let usage = UsageReceipt provider customer DevNet "allowance" "usage" "completion" 1 now "policy"
+      payment = PaymentReceipt provider customer MainNet "invoice" "payment" "evidence" BankUSD 1.0 now
+      dispute = InvoiceDispute provider customer DevNet "invoice" "reason" now
+  submitMustFail customer $ createCmd usage
+  submitMustFail customer $ createCmd payment
+  submitMustFail provider $ createCmd dispute
+  forA_ [(usage with allowanceId = ""), (usage with customer = provider),
+         (usage with pricingPolicyVersion = ""), (usage with measuredUnits = -1)] $ \bad ->
+    submitMustFail provider $ createCmd bad
+  forA_ [(payment with invoiceId = ""), (payment with paymentRail = SimulatedPayment),
+         (payment with customer = provider)] $ \bad -> submitMustFail provider $ createCmd bad
+  submitMustFail customer $ createCmd (dispute with invoiceId = "")
+
+testCompleteLifecycleAllNetworks : Script ()
+testCompleteLifecycleAllNetworks = script do
+  forA_ [LocalNet, DevNet, TestNet, MainNet] $ \network -> do
+    (provider, customer, other, start, serviceAgreement) <- setup ManagedUsage network
+    cid <- allowance provider start serviceAgreement
+    job <- submit customer $ exerciseCmd cid (SubmitDemoJob "job")
+    done <- submit provider $ exerciseCmd job (CompleteDemoJob "completion")
+    (remaining, usage) <- submit provider $ exerciseCmd cid (RecordMeasuredUsage "usage" "completion" 10 start)
+    (fromSome <$> queryContractId customer done) >>= (\d -> d.network === network)
+    (fromSome <$> queryContractId customer usage) >>= (\u -> u.measuredUnits === 10)
+    let end = start `addRelTime` days 15
+    setTime end
+    bill <- submit provider $ exerciseCmd serviceAgreement (IssueInvoice "invoice" start end end [InvoiceLine "charge" "usage" "quote" 0.25])
+    (paid, receipt) <- submit provider $ exerciseCmd bill (RecordVerifiedPayment "payment" "bank-evidence" BankUSD 0.25)
+    (fromSome <$> queryContractId customer paid) >>= (\i -> i.paidUsd === invoiceTotal i.lines)
+    queryContractId other receipt >>= (=== None)
+    submit provider $ exerciseCmd remaining RevokeAllowance
+    submit customer $ exerciseCmd serviceAgreement (CloseAgreement customer)
+
+testBatchFailureRollsBackEarlierCommands : Script ()
+testBatchFailureRollsBackEarlierCommands = script do
+  (provider, customer, _, now, serviceAgreement) <- setup ManagedUsage DevNet
+  cid <- allowance provider now serviceAgreement
+  submitMustFail provider $
+    exerciseCmd cid (RecordMeasuredUsage "one" "completion" 1 now)
+    *> exerciseCmd cid (RecordMeasuredUsage "two" "completion" 1 now)
+  (fromSome <$> queryContractId customer cid) >>= (\a -> a.remainingUnits === 100)
+  query @UsageReceipt customer >>= (=== [])
+
+recordMany : Party -> Party -> Time -> ContractId UsageAllowance -> Int -> Script (ContractId UsageAllowance)
+recordMany provider customer now current index = if index > 64 then pure current else do
+  let ref = "usage-" <> show index
+  (next, _) <- submit provider $ exerciseCmd current (RecordMeasuredUsage ref ("completion-" <> show index) 1 now)
+  record <- queryContractId customer next
+  (fromSome record).remainingUnits === 100 - index
+  recordMany provider customer now next (index + 1)
+
+testRepeatedMeteringConservesUnits : Script ()
+testRepeatedMeteringConservesUnits = script do
+  (provider, customer, _, now, serviceAgreement) <- setup ManagedUsage DevNet
+  cid <- allowance provider now serviceAgreement
+  final <- recordMany provider customer now cid 1
+  submitMustFail provider $ exerciseCmd final (RecordMeasuredUsage "usage-1" "completion-1" 1 now)
+  receipts <- query @UsageReceipt customer
+  length receipts === 64
+  (fromSome <$> queryContractId customer final) >>= (\a -> length a.recordedUsageRefs === 64)
+
+testArchiveAuthorityAndAuditRetention : Script ()
+testArchiveAuthorityAndAuditRetention = script do
+  (provider, customer, other, start, serviceAgreement) <- setup ManagedUsage DevNet
+  cid <- allowance provider start serviceAgreement
+  job <- submit customer $ exerciseCmd cid (SubmitDemoJob "job")
+  completed <- submit provider $ exerciseCmd job (CompleteDemoJob "completion")
+  pendingJob <- submit customer $ exerciseCmd cid (SubmitDemoJob "pending-job")
+  (remaining, usage) <- submit provider $ exerciseCmd cid (RecordMeasuredUsage "usage" "completion" 1 start)
+  offer <- submit provider $ createCmd (ServiceOffer provider customer "extra-offer" DevNet ManagedUsage
+    (ServiceTerms "terms" "policy" 1.0 10 (start `addRelTime` days 30)) (start `addRelTime` days 1))
+  let end = start `addRelTime` days 15
+  setTime end
+  bill <- submit provider $ exerciseCmd serviceAgreement (IssueInvoice "invoice" start end end [InvoiceLine "charge" "usage" "quote" 1.0])
+  (paid, payment) <- submit provider $ exerciseCmd bill (RecordVerifiedPayment "payment" "evidence" BankUSD 1.0)
+  dispute <- submit customer $ exerciseCmd paid (DisputeInvoice "reason")
+  funding <- submit provider $ createCmd (FundingReceipt provider customer DevNet "plan" "purchase" 1 1.0 end)
+  topup <- submit provider $ createCmd (TopUpReceipt provider customer DevNet "order" "transfer" 1.0 end)
+  submitMustFail provider $ archiveCmd serviceAgreement
+  submitMustFail customer $ archiveCmd remaining
+  submitMustFail provider $ archiveCmd pendingJob
+  submitMustFail customer $ archiveCmd payment
+  submitMustFail provider $ archiveCmd dispute
+  submitMustFail other $ archiveCmd offer
+  submit (actAs [provider, customer]) $
+    archiveCmd serviceAgreement *> archiveCmd remaining *> archiveCmd pendingJob
+  submit provider $
+    archiveCmd completed *> archiveCmd usage *> archiveCmd offer *> archiveCmd paid
+    *> archiveCmd payment *> archiveCmd funding *> archiveCmd topup
+  submit customer $ archiveCmd dispute
+  -- Audit consumers must retain transaction history, not just the active set.
+  queryContractId customer payment >>= (=== None)
+  queryContractId provider dispute >>= (=== None)

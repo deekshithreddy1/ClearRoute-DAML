@@ -1,0 +1,8 @@
+{
+    "testedAtUtc":  "2026-10-07T16:20:16.2086022Z",
+    "baselineSha256":  "B027BC5DF95F0F424BC8084AE9A6F401EE61B25634824B2483405B43EF91B50F",
+    "optionalFieldUpgrade":  "passed",
+    "requiredFieldUpgrade":  "rejected as expected",
+    "fixtureDirectory":  "C:\\Users\\Deekshith\\Blockchain\\ClearRoute-Canton\\launchfuel\\ClearRoute-DAML\\evidence\\upgrade-19b22fe4",
+    "note":  "Compiler compatibility test only; fixture DARs are not release artifacts."
+}

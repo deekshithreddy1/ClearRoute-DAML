@@ -1,0 +1,17 @@
+module ClearRoute.TopUpReceipt where
+
+import ClearRoute.Types
+
+template TopUpReceipt
+  with
+    provider : Party
+    customer : Party
+    network : Network
+    orderRef : Text
+    nativeTransferRef : Text
+    recipientCc : Decimal
+    completedAt : Time
+  where
+    signatory provider
+    observer customer
+    ensure provider /= customer && orderRef /= "" && nativeTransferRef /= "" && recipientCc > 0.0

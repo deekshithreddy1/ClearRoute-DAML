@@ -1,0 +1,16 @@
+module ClearRoute.Dispute where
+
+import ClearRoute.Types
+
+template InvoiceDispute
+  with
+    provider : Party
+    customer : Party
+    network : Network
+    invoiceId : Text
+    reason : Text
+    raisedAt : Time
+  where
+    signatory customer
+    observer provider
+    ensure provider /= customer && invoiceId /= "" && reason /= ""

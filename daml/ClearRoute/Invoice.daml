@@ -1,0 +1,57 @@
+module ClearRoute.Invoice where
+
+import DA.Time (addRelTime, days)
+import ClearRoute.Types
+import ClearRoute.PaymentReceipt
+import ClearRoute.Dispute
+
+template Invoice
+  with
+    provider : Party
+    customer : Party
+    agreementId : Text
+    network : Network
+    invoiceId : Text
+    pricingPolicyVersion : Text
+    periodStart : Time
+    periodEnd : Time
+    dueAt : Time
+    lines : [InvoiceLine]
+    paidUsd : Decimal
+    recordedPaymentRefs : [Text]
+  where
+    signatory provider
+    observer customer
+    ensure provider /= customer && agreementId /= ""
+      && unique recordedPaymentRefs && all (/= "") recordedPaymentRefs
+      && ((paidUsd == 0.0) == null recordedPaymentRefs)
+      && invoiceId /= "" && pricingPolicyVersion /= "" && not (null lines)
+      && all validLine lines && unique (map (.chargeRef) lines)
+      && periodEnd == periodStart `addRelTime` days 15 && dueAt >= periodEnd
+      && paidUsd >= 0.0 && paidUsd <= invoiceTotal lines
+    -- Invoice issuance uniqueness is maintained by the backend database/outbox.
+
+    choice RecordVerifiedPayment : (ContractId Invoice, ContractId PaymentReceipt)
+      with
+        paymentRef : Text
+        evidenceRef : Text
+        paymentRail : PaymentRail
+        settledUsd : Decimal
+      controller provider
+      do
+        assertMsg "Payment reference already allocated" (not (paymentRef `elem` recordedPaymentRefs))
+        assertMsg "Payment must be positive and no greater than outstanding" (settledUsd > 0.0 && settledUsd <= invoiceTotal lines - paidUsd)
+        assertMsg "Simulated payment cannot settle a MainNet invoice" (network /= MainNet || paymentRail /= SimulatedPayment)
+        now <- getTime
+        receipt <- create PaymentReceipt with
+          provider; customer; network; invoiceId; paymentRef; evidenceRef; paymentRail; settledUsd
+          recordedAt = now
+        next <- create this with paidUsd = paidUsd + settledUsd; recordedPaymentRefs = paymentRef :: recordedPaymentRefs
+        pure (next, receipt)
+
+    nonconsuming choice DisputeInvoice : ContractId InvoiceDispute
+      with reason : Text
+      controller customer
+      do
+        now <- getTime
+        create InvoiceDispute with provider; customer; network; invoiceId; reason; raisedAt = now

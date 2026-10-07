@@ -1,0 +1,45 @@
+module ClearRoute.Types where
+
+
+
+-- These are service records, not CC tokens or the participant traffic balance.
+data Network = LocalNet | DevNet | TestNet | MainNet
+  deriving (Eq, Ord, Show)
+
+data ServiceMode = ManagedUsage | DirectTopUp
+  deriving (Eq, Ord, Show)
+
+data PaymentRail = BankUSD | NativeUSDC | CantonUSDCx | SimulatedPayment
+  deriving (Eq, Show)
+
+data ServiceTerms = ServiceTerms with
+    termsRef : Text
+    pricingPolicyVersion : Text
+    exposureLimitUsd : Decimal
+    maxAllowanceUnits : Int
+    validUntil : Time
+  deriving (Eq, Show)
+
+validTerms : ServiceTerms -> Bool
+validTerms terms =
+  terms.termsRef /= "" && terms.pricingPolicyVersion /= ""
+  && terms.exposureLimitUsd > 0.0 && terms.maxAllowanceUnits > 0
+
+-- Each fixed amount has already been calculated from a versioned commercial
+-- tariff. These references are not oracles; backend evidence must validate them.
+data InvoiceLine = InvoiceLine with
+    chargeRef : Text
+    usageRef : Text
+    quoteRef : Text
+    fixedUsd : Decimal
+  deriving (Eq, Show)
+
+validLine : InvoiceLine -> Bool
+validLine line = line.chargeRef /= "" && line.usageRef /= "" && line.quoteRef /= "" && line.fixedUsd >= 0.0
+
+invoiceTotal : [InvoiceLine] -> Decimal
+invoiceTotal lines = sum (map (.fixedUsd) lines)
+
+unique : Eq a => [a] -> Bool
+unique [] = True
+unique (x :: xs) = not (x `elem` xs) && unique xs

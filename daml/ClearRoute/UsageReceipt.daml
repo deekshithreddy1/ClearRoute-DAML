@@ -1,0 +1,21 @@
+module ClearRoute.UsageReceipt where
+
+import ClearRoute.Types
+
+template UsageReceipt
+  with
+    provider : Party
+    customer : Party
+    network : Network
+    allowanceId : Text
+    usageRef : Text
+    completionRef : Text
+    measuredUnits : Int
+    measurementAt : Time
+    pricingPolicyVersion : Text
+  where
+    signatory provider
+    observer customer
+    ensure provider /= customer && allowanceId /= ""
+      && usageRef /= "" && completionRef /= "" && measuredUnits >= 0
+      && pricingPolicyVersion /= ""
